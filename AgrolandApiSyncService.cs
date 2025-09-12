@@ -81,9 +81,6 @@ namespace AgrolandApiSync
                     await _apiService.SyncProducts();
                     Log.Information("Product sync completed.");
                 }
-
-                DateTime nextRun = _lastRunTime.Add(_interval);
-                Log.Information("All processes completed. Next run scheduled at: {NextRun}", nextRun);
             }
             catch (Exception ex)
             {

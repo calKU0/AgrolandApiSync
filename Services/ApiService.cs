@@ -31,13 +31,13 @@ namespace AgrolandApiSync.Services
 
         public async Task SyncProducts()
         {
-            HashSet<int> fetchedProductIds = new HashSet<int>();
-            bool hasErrors = false;
-
             using (var client = new HttpClient())
             {
                 try
                 {
+                    int productInserted = 0;
+                    int productUpdated = 0;
+
                     var url = $"{_apiSettings.BaseUrl}1/3/utf8/{_apiSettings.ApiKey}?stream=true";
                     Log.Information($"Sending request to {url}.");
                     var response = await client.GetAsync(url);
@@ -55,11 +55,12 @@ namespace AgrolandApiSync.Services
                     {
                         apiResponse = (Products)serializer.Deserialize(reader);
                     }
+                    Log.Information($"Got response with {apiResponse.ProductList.Count()} products.");
 
                     using (SqlConnection connection = new SqlConnection(_connectionString))
                     {
                         await connection.OpenAsync();
-
+                        Log.Information($"Attempting to update {apiResponse.ProductList.Count()} products in database.");
                         foreach (var apiProduct in apiResponse.ProductList)
                         {
                             try
@@ -70,24 +71,35 @@ namespace AgrolandApiSync.Services
                                     cmd.CommandType = CommandType.StoredProcedure;
                                     cmd.Parameters.AddWithValue("@NAZWA", apiProduct.Name ?? (object)DBNull.Value);
                                     cmd.Parameters.AddWithValue("@STAN", (object)apiProduct.Qty ?? 0);
-                                    cmd.Parameters.AddWithValue("@INDEKS_KATALOGOWY", apiProduct.Sku ?? (object)DBNull.Value);
+                                    cmd.Parameters.AddWithValue("@INDEKS_KATALOGOWY", apiProduct.Ean ?? (object)DBNull.Value);
                                     cmd.Parameters.AddWithValue("@CENA_ZAKUPU_BRUTTO", (apiProduct.PriceAfterDiscountNet * 1.23m));
                                     cmd.Parameters.AddWithValue("@CENA_ZAKUPU_NETTO", (object)apiProduct.PriceAfterDiscountNet ?? 0);
                                     cmd.Parameters.AddWithValue("@CENA_SPRZEDAZY_BRUTTO", (apiProduct.PriceAfterDiscountNet * 1.23m) * ((_margin / 100m) + 1));
                                     cmd.Parameters.AddWithValue("@CENA_SPRZEDAZY_NETTO", apiProduct.PriceAfterDiscountNet * ((_margin / 100m) + 1));
+                                    cmd.Parameters.AddWithValue("@VAT_ZAKUPU", apiProduct.Vat.ToString() ?? "23");
+                                    cmd.Parameters.AddWithValue("@VAT_SPRZEDAZY", apiProduct.Vat.ToString() ?? "23");
                                     cmd.Parameters.AddWithValue("@KOD_KRESKOWY", apiProduct.Ean ?? (object)DBNull.Value);
                                     cmd.Parameters.AddWithValue("@WAGA", apiProduct.Weight ?? (object)DBNull.Value);
-                                    cmd.Parameters.AddWithValue("@PRODUCENT", apiProduct.Brand ?? (object)DBNull.Value);
+                                    cmd.Parameters.AddWithValue("@PRODUCENT", apiProduct.Brand?.Name ?? (object)DBNull.Value);
                                     cmd.Parameters.AddWithValue("@ID_PRODUCENTA", (object)apiProduct.Id ?? (object)DBNull.Value);
+                                    cmd.Parameters.AddWithValue("@INTEGRATION_COMPANY", "AGROLAND");
                                     cmd.Parameters.AddWithValue("@UNIT", apiProduct.Unit ?? (object)DBNull.Value);
 
+                                    var resultParam = cmd.Parameters.Add("@Result", SqlDbType.Int);
+                                    resultParam.Direction = ParameterDirection.Output;
+
                                     await cmd.ExecuteNonQueryAsync();
-                                    Log.Information($"Update product SUCCESS: Product SKU = {apiProduct.Sku}, Name = {apiProduct.Name}");
+
+                                    int result = (int)resultParam.Value;
+                                    if (result == 1) productInserted++;
+                                    else if (result == 2) productUpdated++;
+
+                                    Log.Information($"Updated/inserted product: Product EAN = {apiProduct.Ean}, Name = {apiProduct.Name}");
                                 }
                             }
                             catch (Exception ex)
                             {
-                                Log.Error(ex.Message, $"Update product FAILED: Product SKU = {apiProduct.Sku}, Name = {apiProduct.Name}");
+                                Log.Error(ex, $"Failed to update/insert product: Product EAN = {apiProduct.Ean}, Name = {apiProduct.Name}");
                             }
 
                             try
@@ -110,15 +122,15 @@ namespace AgrolandApiSync.Services
                                 using (var descCmd = new SqlCommand("dbo.UpdateProductDescription", connection))
                                 {
                                     descCmd.CommandType = CommandType.StoredProcedure;
-                                    descCmd.Parameters.AddWithValue("@INDEKS_KATALOGOWY", apiProduct.Sku ?? (object)DBNull.Value);
+                                    descCmd.Parameters.AddWithValue("@INDEKS_KATALOGOWY", apiProduct.Ean ?? (object)DBNull.Value);
                                     descCmd.Parameters.AddWithValue("@NowyOpis", nowyOpis ?? (object)DBNull.Value);
                                     await descCmd.ExecuteNonQueryAsync();
-                                    Log.Information($"Update product description SUCCESS: Product SKU = {apiProduct.Sku}, Name = {apiProduct.Name}");
+                                    Log.Information($"Updated/inserted product description: Product EAN = {apiProduct.Ean}, Name = {apiProduct.Name}");
                                 }
                             }
                             catch (Exception ex)
                             {
-                                Log.Error(ex.Message, $"Update product description FAILED: Product SKU = {apiProduct.Sku}, Name = {apiProduct.Name}");
+                                Log.Error(ex, $"Failed to update/insert product description: Product EAN = {apiProduct.Ean}, Name = {apiProduct.Name}");
                             }
 
                             try
@@ -135,20 +147,26 @@ namespace AgrolandApiSync.Services
                                         using (var cmdImg = new SqlCommand("dbo.UpsertProductImage", connection))
                                         {
                                             cmdImg.CommandType = CommandType.StoredProcedure;
-                                            cmdImg.Parameters.Add("@INDEKS", SqlDbType.VarChar, 20).Value = apiProduct.Sku ?? (object)DBNull.Value;
+                                            cmdImg.Parameters.Add("@INDEKS", SqlDbType.VarChar, 20).Value = apiProduct.Ean ?? (object)DBNull.Value;
                                             cmdImg.Parameters.Add("@NAZWA_PLIKU", SqlDbType.VarChar, 100).Value = img.Id.ToString() ?? "image";
                                             cmdImg.Parameters.Add("@DANE", SqlDbType.VarBinary, -1).Value = imageData;
+
                                             await cmdImg.ExecuteNonQueryAsync();
-                                            Log.Information($"Update product image SUCCESS: Product SKU = {apiProduct.Sku}, Name = {apiProduct.Name}");
+                                            Log.Information($"Updated/inserted product image: Product EAN = {apiProduct.Ean}, Name = {apiProduct.Name}");
                                         }
                                     }
                                 }
                             }
+                            catch (HttpRequestException httpEx)
+                            {
+                                Log.Error(httpEx, $"Failed to download product image: Product EAN = {apiProduct.Ean}, Name = {apiProduct.Name}");
+                            }
                             catch (Exception ex)
                             {
-                                Log.Error(ex.Message, $"Update product image FAILED: Product SKU = {apiProduct.Sku}, Name = {apiProduct.Name}");
+                                Log.Error(ex, $"Failed to update/insert product image: Product EAN = {apiProduct.Ean}, Name = {apiProduct.Name}");
                             }
                         }
+                        Log.Information("Products imported: {Total} out of {ToUpdate}, Inserted: {Inserted}, Updated: {Updated}", productInserted + productUpdated, apiResponse.ProductList.Count(), productInserted, productUpdated);
                     }
                 }
                 catch (Exception ex)
