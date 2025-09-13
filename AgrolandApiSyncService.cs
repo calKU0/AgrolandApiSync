@@ -88,8 +88,8 @@ namespace AgrolandApiSync
             }
             finally
             {
-                DateTime nextRun = DateTime.Now.AddHours(2);
-                _timer.Change(TimeSpan.FromHours(2), Timeout.InfiniteTimeSpan);
+                DateTime nextRun = DateTime.Now.AddHours(_interval.TotalHours);
+                _timer.Change(_interval, Timeout.InfiniteTimeSpan);
 
                 Log.Information("All processes completed. Next run scheduled at: {NextRun}", nextRun);
             }
